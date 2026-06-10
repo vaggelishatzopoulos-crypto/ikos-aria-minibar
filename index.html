@@ -157,6 +157,10 @@ h2.sec{font-size:18px;margin:2px 0 12px;color:var(--ink);font-weight:600}
 .urow input{width:84px;font-family:var(--mono);text-align:center;border:1px solid var(--line);border-radius:8px;padding:7px;font-size:14px}
 .tag{font-size:11px;font-weight:600;padding:2px 8px;border-radius:99px;background:#EDF1F6;color:var(--navy)}
 .tag.mgr{background:var(--blue-bg);color:var(--blue-d)}
+.fbstat{font-size:12px;padding:4px 9px;border-radius:8px;background:rgba(255,255,255,.08);color:#9fb0c2;cursor:pointer;white-space:nowrap;font-variant-numeric:tabular-nums}
+.fbstat.live{color:#7FE3CF}
+.fbstat.err{color:#ff9b8a}
+.fbstat.local{color:#c0cdda}
 .toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:var(--ink);color:#fff;padding:11px 18px;border-radius:99px;font-size:14px;z-index:60;box-shadow:0 8px 24px rgba(0,0,0,.2);opacity:0;transition:.2s}
 .toast.on{opacity:1}
 .file-in{display:block;margin:8px 0;font-size:13px}
@@ -168,6 +172,7 @@ h2.sec{font-size:18px;margin:2px 0 12px;color:var(--ink);font-weight:600}
 <div class="top"><div class="wrap">
   <div class="brand">Ikos Aria · <b>Mini Bar</b></div>
   <div class="sp"></div>
+  <div class="fbstat" id="fbstat">● σύνδεση…</div>
   <div class="clock mono" id="clock">--:--</div>
   <div class="who" id="who"></div>
   <button class="btn ghost-l sm hide" id="logout">Έξοδος</button>
@@ -217,14 +222,20 @@ const USERS = [
 
 /* ---------- state + storage ---------- */
 let S = { date:CFG.date, rooms:{}, audit:[], history:[], pins:{} };
-let me=null, view={name:"login"}, pinBuf="", FB=null;
+let me=null, view={name:"login"}, pinBuf="", FB=null, FB_ERR="";
+function setFb(state,msg){
+  FB_ERR=msg||""; const el=document.getElementById("fbstat"); if(!el)return;
+  el.className="fbstat "+(state==="live"?"live":state==="error"?"err":"local");
+  el.textContent = state==="live"?"\u25cf Live": state==="connecting"?"\u25cf \u03c3\u03cd\u03bd\u03b4\u03b5\u03c3\u03b7\u2026": state==="error"?"\u25cf \u03a3\u03c6\u03ac\u03bb\u03bc\u03b1": "\u25cf \u03a4\u03bf\u03c0\u03b9\u03ba\u03ac";
+  el.onclick=()=>{ toast(state==="live"?"Live sync \u2713 \u2014 \u03c3\u03c5\u03b3\u03c7\u03c1\u03bf\u03bd\u03af\u03b6\u03b5\u03c4\u03b1\u03b9": (FB_ERR||"\u03a4\u03bf\u03c0\u03b9\u03ba\u03ae \u03bb\u03b5\u03b9\u03c4\u03bf\u03c5\u03c1\u03b3\u03af\u03b1 \u2014 \u03c7\u03c9\u03c1\u03af\u03c2 sync")); };
+}
 
 function ls(get,val){ try{ if(get) return localStorage.getItem("iar_mb"); localStorage.setItem("iar_mb",val);}catch(e){return null;} }
 function seedRooms(){ const o={}; SEED.rooms.forEach(r=>{o[r.room]=r;}); return o; }
 function freshState(){ return {date:CFG.date, rooms:seedRooms(), audit:[], history:[], pins:{}}; }
 
 function persist(){
-  if(FB){ FB.ref("state").set(S); }
+  if(FB){ FB.ref("state").set(S).catch(e=>setFb("error","write: "+((e&&e.code)||(e&&e.message)||e))); }
   else { ls(false, JSON.stringify(S)); }
 }
 function loadLocal(){
@@ -236,23 +247,27 @@ function loadLocal(){
 /* ---------- firebase (live sync) ---------- */
 function loadScript(src){ return new Promise((res,rej)=>{ const s=document.createElement("script"); s.src=src; s.onload=res; s.onerror=()=>rej(new Error("load "+src)); document.head.appendChild(s); }); }
 function connectFirebase(){
-  if(!CFG.firebase || !CFG.firebase.apiKey){ return; }
+  if(!CFG.firebase || !CFG.firebase.apiKey){ setFb("local","\u0394\u03b5\u03bd \u03ad\u03c7\u03b5\u03b9 \u03bc\u03c0\u03b5\u03b9 Firebase config."); return; }
+  setFb("connecting");
+  var done=false;
+  setTimeout(function(){ if(!done && !FB) setFb("local","Timeout \u2014 \u03b4\u03b5\u03bd \u03b1\u03c0\u03ac\u03bd\u03c4\u03b7\u03c3\u03b5 \u03c4\u03bf Firebase."); }, 8000);
   Promise.all([
     loadScript("https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"),
     loadScript("https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"),
     loadScript("https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js")
-  ]).then(()=>{
+  ]).then(function(){
     firebase.initializeApp(CFG.firebase);
     return firebase.auth().signInAnonymously();
-  }).then(()=>{
+  }).then(function(){
     FB=firebase.database();
     return FB.ref("state").once("value");
-  }).then(snap=>{
-    const v=snap.val();
+  }).then(function(snap){
+    done=true;
+    var v=snap.val();
     if(v && v.rooms && Object.keys(v.rooms).length){ S=v; } else { FB.ref("state").set(S); }
-    FB.ref("state").on("value", s=>{ const nv=s.val(); if(nv){ S=nv; render(); } });
-    render(); toast("Live sync \u2713");
-  }).catch(e=>{ console.warn("Firebase off:",e); FB=null; toast("\u03a4\u03bf\u03c0\u03b9\u03ba\u03ae \u03bb\u03b5\u03b9\u03c4\u03bf\u03c5\u03c1\u03b3\u03af\u03b1 (offline)"); });
+    FB.ref("state").on("value", function(s){ var nv=s.val(); if(nv){ S=nv; render(); } });
+    render(); setFb("live");
+  }).catch(function(e){ done=true; FB=null; var code=(e&&e.code)?e.code:((e&&e.message)?e.message:String(e)); setFb("error", code); console.warn("Firebase off:",e); });
 }
 
 /* ---------- helpers ---------- */
