@@ -233,6 +233,23 @@ function setFb(state,msg){
 function ls(get,val){ try{ if(get) return localStorage.getItem("iar_mb"); localStorage.setItem("iar_mb",val);}catch(e){return null;} }
 function seedRooms(){ const o={}; SEED.rooms.forEach(r=>{o[r.room]=r;}); return o; }
 function freshState(){ return {date:CFG.date, rooms:seedRooms(), audit:[], history:[], pins:{}}; }
+function normalizeState(s){
+  s=s||{};
+  if(!s.rooms||typeof s.rooms!=="object"||!Object.keys(s.rooms).length) s.rooms=seedRooms();
+  if(!Array.isArray(s.audit)) s.audit=[];
+  if(!Array.isArray(s.history)) s.history=[];
+  if(!s.pins||typeof s.pins!=="object") s.pins={};
+  if(!s.date) s.date=CFG.date;
+  Object.keys(s.rooms).forEach(function(k){
+    var r=s.rooms[k];
+    if(!r.status||typeof r.status!=="object") r.status={state:"pending"};
+    if(!r.status.state) r.status.state="pending";
+    if(!Array.isArray(r.chips)) r.chips=[];
+    if(!r.pax||typeof r.pax!=="object") r.pax={adults:0,children:0};
+    if(!r.flags||typeof r.flags!=="object") r.flags={};
+  });
+  return s;
+}
 
 function persist(){
   if(FB){ FB.ref("state").set(S).catch(e=>setFb("error","write: "+((e&&e.code)||(e&&e.message)||e))); }
@@ -240,8 +257,9 @@ function persist(){
 }
 function loadLocal(){
   const raw=ls(true);
-  if(raw){ try{ S=JSON.parse(raw); if(!S.rooms||Object.keys(S.rooms).length===0) S=freshState(); }catch(e){ S=freshState(); } }
+  if(raw){ try{ S=JSON.parse(raw); }catch(e){ S=freshState(); } }
   else S=freshState();
+  S=normalizeState(S);
 }
 
 /* ---------- firebase (live sync) ---------- */
@@ -264,8 +282,8 @@ function connectFirebase(){
   }).then(function(snap){
     done=true;
     var v=snap.val();
-    if(v && v.rooms && Object.keys(v.rooms).length){ S=v; } else { FB.ref("state").set(S); }
-    FB.ref("state").on("value", function(s){ var nv=s.val(); if(nv){ S=nv; render(); } });
+    if(v && v.rooms && Object.keys(v.rooms).length){ S=normalizeState(v); } else { FB.ref("state").set(S); }
+    FB.ref("state").on("value", function(s){ var nv=s.val(); if(nv){ S=normalizeState(nv); render(); } });
     render(); setFb("live");
   }).catch(function(e){ done=true; FB=null; var code=(e&&e.code)?e.code:((e&&e.message)?e.message:String(e)); setFb("error", code); console.warn("Firebase off:",e); });
 }
@@ -274,11 +292,11 @@ function connectFirebase(){
 const $=s=>document.querySelector(s);
 function toast(t){ const el=$("#toast"); el.textContent=t; el.classList.add("on"); clearTimeout(el._t); el._t=setTimeout(()=>el.classList.remove("on"),1800); }
 function nowHHMM(){ const d=new Date(); return String(d.getHours()).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0"); }
-function pinFor(u){ return S.pins[u.id] || u.pin; }
+function pinFor(u){ return (S.pins && S.pins[u.id]) || u.pin; }
 function sectionOf(rm){ const b=rm[0]; for(const k in CFG.sections){ if(CFG.sections[k].blds.includes(b)) return k; } return "A"; }
 function effort(rm){ return CFG.effort[rm[0]]||1; }
 function roomsInSection(sec){ return Object.values(S.rooms).filter(r=>r.section===sec).sort((a,b)=>a.room.localeCompare(b.room)); }
-function audit(action,detail){ S.audit.unshift({at:Date.now(), user:me?me.name:"-", action, detail:detail||""}); if(S.audit.length>500)S.audit.pop(); }
+function audit(action,detail){ if(!Array.isArray(S.audit))S.audit=[]; S.audit.unshift({at:Date.now(), user:me?me.name:"-", action, detail:detail||""}); if(S.audit.length>500)S.audit.pop(); }
 function esc(t){ return (t||"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
 
 /* ---------- mutations ---------- */
