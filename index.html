@@ -208,6 +208,11 @@ const T = {
    localOnly:"Local mode — no sync", noConfig:"No Firebase config.", timeout:"Timeout — Firebase did not respond.",
    dndPrompt:"DnD — reason (optional): e.g. DnD sign / no refill", notePrompt:"Room note / new info (leave empty to clear):",
    confirmArchive:"Archive the day and reset all statuses?", removeUser:"Remove this user?", localTag:"Local",
+   farewellTask:"Farewell gift", roomChanges:"Room changes", roomChangesS:"guest room moves",
+   movedFrom:"Moved from", rcDates:"Dates", noMoves:"No room changes today.",
+   wrongReport:"This looks like the arrivals report. Please export gibyroom (in-house — all rooms).",
+   impStep3:"3 · Room changes (.docx, optional)", impStep3s:"guest room moves for the day (fixes false arrivals)",
+   movesLoaded:"room changes", dayLog:"Movements of the day",
    conn:"connecting…" },
  el:{ welcome:"Καλωσήρθες", enterPin:"Βάλε το PIN σου για να συνεχίσεις", wrongPin:"Λάθος PIN, δοκίμασε ξανά.",
    hint:"Demo PIN — Manager 1000 · Barista 2001 (αλλάζουν από Χρήστες & PIN)", logout:"Έξοδος",
@@ -240,6 +245,11 @@ const T = {
    localOnly:"Τοπική λειτουργία — χωρίς sync", noConfig:"Δεν έχει μπει Firebase config.", timeout:"Timeout — δεν απάντησε το Firebase.",
    dndPrompt:"DnD — λόγος (προαιρετικό): π.χ. DnD sign / no refill", notePrompt:"Σημείωση δωματίου / νέα πληροφορία (κενό για διαγραφή):",
    confirmArchive:"Αρχειοθέτηση ημέρας και μηδενισμός όλων των status;", removeUser:"Διαγραφή αυτού του χρήστη;", localTag:"Τοπικά",
+   farewellTask:"Δώρο αναχώρησης", roomChanges:"Αλλαγές δωματίων", roomChangesS:"μετακινήσεις πελατών",
+   movedFrom:"Από", rcDates:"Ημ/νίες", noMoves:"Καμία αλλαγή δωματίου σήμερα.",
+   wrongReport:"Αυτό μοιάζει με το report αφίξεων. Κάνε export το gibyroom (in-house — όλα τα δωμάτια).",
+   impStep3:"3 · Αλλαγές δωματίων (.docx, προαιρετικό)", impStep3s:"μετακινήσεις πελατών της ημέρας (διορθώνει ψεύτικες αφίξεις)",
+   movesLoaded:"αλλαγές δωματίων", dayLog:"Κινήσεις ημέρας",
    conn:"σύνδεση…" }
 };
 const CHIP_I18N = { el:{
@@ -273,7 +283,9 @@ function normalizeState(s){
   if(!Array.isArray(s.history)) s.history=[];
   if(!Array.isArray(s.users)||!s.users.length) s.users=JSON.parse(JSON.stringify(DEFAULT_USERS));
   if(!s.notes||typeof s.notes!=="object") s.notes={};
+  if(!Array.isArray(s.moves)) s.moves=[];
   if(!s.date) s.date=CFG.date;
+  CFG.date=s.date;
   s.users.forEach(u=>{ if(u.active===undefined)u.active=true; });
   Object.keys(s.rooms).forEach(k=>{ const r=s.rooms[k];
     if(!r.status||typeof r.status!=="object") r.status={state:"pending"};
@@ -281,10 +293,13 @@ function normalizeState(s){
     if(!Array.isArray(r.chips)) r.chips=[];
     if(!r.pax||typeof r.pax!=="object") r.pax={adults:0,children:0};
     if(!r.flags||typeof r.flags!=="object") r.flags={};
+    if(!r.farewellStatus||typeof r.farewellStatus!=="object") r.farewellStatus={state:"pending"};
+    if(!r.farewellStatus.state) r.farewellStatus.state="pending";
   });
   return s;
 }
 function persist(){ if(FB){ FB.ref("state").set(S).catch(e=>setFb("error","write: "+((e&&e.code)||(e&&e.message)||e))); } else { ls(false, JSON.stringify(S)); } }
+function fbUpdate(obj){ if(FB){ FB.ref("state").update(obj).catch(e=>setFb("error","write: "+((e&&e.code)||(e&&e.message)||e))); } else { ls(false, JSON.stringify(S)); } }
 function loadLocal(){ const raw=ls(true); if(raw){ try{ S=JSON.parse(raw); }catch(e){ S=freshState(); } } else S=freshState(); S=normalizeState(S); }
 
 /* ---------- firebase ---------- */
@@ -306,7 +321,7 @@ function connectFirebase(){
   .then(function(){ FB=firebase.database(); return FB.ref("state").once("value"); })
   .then(function(snap){ done=true; var v=snap.val();
     if(v && v.rooms && Object.keys(v.rooms).length){ S=normalizeState(v); } else { FB.ref("state").set(S); }
-    FB.ref("state").on("value", function(s){ var nv=s.val(); if(nv){ S=normalizeState(nv); render(); } });
+    FB.ref("state").on("value", function(s){ var nv=s.val(); if(nv && nv.rooms && Object.keys(nv.rooms).length){ S=normalizeState(nv); render(); } });
     render(); setFb("live");
   }).catch(function(e){ done=true; FB=null; var code=(e&&e.code)?e.code:((e&&e.message)?e.message:String(e)); setFb("error",code); console.warn("Firebase off:",e); });
 }
@@ -324,14 +339,15 @@ function esc(x){ return (x||"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">
 function firstLast(n){ const p=String(n).replace(/,/g," ").trim().split(/\s+/); return p.length>1?p[0]+" "+p[p.length-1]:p[0]||""; }
 
 /* ---------- mutations ---------- */
-function setStatus(rm,state,reason){ const r=S.rooms[rm]; if(!r)return;
-  r.status={state, by:me.id, byName:me.name, at:Date.now(), reason:reason||null};
-  audit(state==="done"?"Done":state==="dnd"?"DnD":"Reopen", rm+(reason?" · "+reason:"")); persist(); render(); }
+function setStatus(rm,state,reason,which){ const r=S.rooms[rm]; if(!r)return; var key=which==="farewell"?"farewellStatus":"status";
+  r[key]={state, by:me.id, byName:me.name, at:Date.now(), reason:reason||null};
+  audit((which==="farewell"?"Farewell ":"")+(state==="done"?"Done":state==="dnd"?"DnD":"Reopen"), rm+(reason?" · "+reason:""));
+  var u={}; u["rooms/"+rm+"/"+key]=r[key]; u["audit"]=S.audit; fbUpdate(u); render(); }
 function setNote(rm){ const r=S.rooms[rm]; if(!r)return; const cur=(S.notes[rm]&&S.notes[rm].text)||"";
   const v=prompt(t("notePrompt"), cur); if(v===null)return;
   if(v.trim()===""){ delete S.notes[rm]; audit("Note cleared", rm); }
   else { S.notes[rm]={text:v.trim(), by:me.name, at:Date.now(), arr:r.arrival}; audit("Note", rm); }
-  persist(); render(); }
+  var u={}; u["notes/"+rm]=(S.notes[rm]||null); u["audit"]=S.audit; fbUpdate(u); render(); }
 
 /* ---------- views ---------- */
 function render(){
@@ -350,6 +366,8 @@ function render(){
   else if(view.name==="users") h=usersView();
   else if(view.name==="audit") h=auditView();
   else if(view.name==="archive") h=archiveView();
+  else if(view.name==="moves") h=movesView();
+  else if(view.name==="histday") h=histDayView(view.idx);
   else if(view.name==="sections") h=sectionsView();
   else h=(me.role==="manager")?dashView():sectionsView();
   root.innerHTML='<main><div class="wrap">'+h+'</div></main>'; bindMain();
@@ -377,7 +395,9 @@ function counts(list){ const c={done:0,dnd:0,pending:0,total:list.length}; list.
 
 function sectionsView(){ const isMgr=me.role==="manager"; let h="";
   if(isMgr) h+='<button class="back" data-go="dash">‹ '+t("dashboard")+'</button>';
-  h+='<div class="eyebrow">'+CFG.date+'</div><h2 class="sec">'+t("choosePost")+'</h2><div class="secgrid">';
+  h+='<div class="eyebrow">'+CFG.date+'</div><h2 class="sec">'+t("choosePost")+'</h2>';
+  if((S.moves||[]).length) h+='<button class="btn sm" data-go="moves" style="margin-bottom:12px">⇄ '+t("roomChanges")+' ('+S.moves.length+')</button>';
+  h+='<div class="secgrid">';
   for(const k in CFG.sections){ const list=roomsInSection(k), cov=coverage(list), c=counts(list);
     h+='<button class="seccard" data-sec="'+k+'"><div class="t">'+CFG.sections[k].label+'</div>'+
        '<div class="d">'+esc(areaOf(k))+' · '+list.length+' '+t("rooms")+'</div>'+
@@ -388,22 +408,25 @@ function sectionsView(){ const isMgr=me.role==="manager"; let h="";
 function roomBadge(r){ if(r.type==="arrival"){ const urgent=r.arrivalTime && r.arrivalTime<CFG.cutoff && r.status.state==="pending";
     return '<span class="badge b-arr'+(urgent?" urgent":"")+'">'+t("arrival")+(r.arrivalTime?" "+r.arrivalTime:"")+'</span>'; }
   return '<span class="badge b-inh">'+t("inhouse")+'</span>'; }
-function roomCard(r){ const isMgr=me.role==="manager"; const cls="rc "+(r.type==="arrival"?"arr ":"")+"s-"+r.status.state;
+function roomCard(r, mode){ const isMgr=me.role==="manager"; const fw=mode==="farewell"; const st=fw?r.farewellStatus:r.status;
+  const cls="rc "+((r.type==="arrival"&&!fw)?"arr ":"")+"s-"+st.state;
   let h='<div class="'+cls+'" data-room="'+r.room+'"><div class="hd"><div class="rno">'+r.room+'<span class="px">'+r.pax.adults+(r.pax.children?"+"+r.pax.children:"")+'</span></div>'+
-    '<div class="row" style="gap:6px">'+(r.farewell?'<span class="badge b-fw">'+t("farewellBadge")+'</span>':"")+roomBadge(r)+
+    '<div class="row" style="gap:6px">'+(fw?'<span class="badge b-fw">'+t("farewellTask")+'</span>':((r.farewell?'<span class="badge b-fw">'+t("farewellBadge")+'</span>':"")+roomBadge(r)))+
     (isMgr?'<button class="edit" data-act="note" data-room="'+r.room+'">✎ '+t("edit")+'</button>':"")+'</div></div>';
+  if(r.moved) h+='<div class="chips"><span class="chip c-care">'+t("movedFrom")+' '+esc(r.moved.from)+'</span></div>';
   if(r.chips&&r.chips.length){ h+='<div class="chips">'+r.chips.map(c=>'<span class="chip c-'+c.c+'">'+esc(chipLabel(c.t))+'</span>').join("")+'</div>'; }
-  if(r.minibarReq) h+='<div class="req"><span class="k">'+t("minibar")+'</span><span class="v">'+esc(r.minibarReq)+'</span></div>';
-  if(r.roomServiceReq) h+='<div class="req"><span class="k">'+t("roomsvc")+'</span><span class="v">'+esc(r.roomServiceReq)+'</span></div>';
+  if(!fw){ if(r.minibarReq) h+='<div class="req"><span class="k">'+t("minibar")+'</span><span class="v">'+esc(r.minibarReq)+'</span></div>';
+    if(r.roomServiceReq) h+='<div class="req"><span class="k">'+t("roomsvc")+'</span><span class="v">'+esc(r.roomServiceReq)+'</span></div>'; }
   if(r.amenity) h+='<div class="req"><span class="k">'+t("amenity")+'</span><span class="v">'+esc(r.amenity)+'</span></div>';
   if(isMgr && r.name) h+='<div class="req"><span class="k">'+t("name")+'</span><span class="v">'+esc(r.name)+'</span></div>';
   if(isMgr && r.attentionNote) h+='<div class="attn">'+esc(r.attentionNote)+'</div>';
   const nt=S.notes[r.room];
   if(nt && nt.text) h+='<div class="rnote"><span class="nlab">'+t("note")+'</span>'+esc(nt.text)+'<div class="nmeta">'+esc(firstLast(nt.by||""))+'</div></div>';
-  if(r.status.state==="pending"){ h+='<div class="acts"><button class="btn bd" data-act="done" data-room="'+r.room+'">'+t("done")+'</button><button class="btn bx" data-act="dnd" data-room="'+r.room+'">'+t("dnd")+'</button></div>'; }
-  else { const tt=new Date(r.status.at), hh=String(tt.getHours()).padStart(2,"0")+":"+String(tt.getMinutes()).padStart(2,"0");
-    const lbl=r.status.state==="done"?t("done"):t("dnd")+(r.status.reason?" · "+esc(r.status.reason):"");
-    h+='<div class="track"><span class="st '+r.status.state+'">'+lbl+' · '+hh+' · '+esc(firstLast(r.status.byName||""))+'</span><button class="reopen" data-act="reopen" data-room="'+r.room+'">'+t("reopen")+'</button></div>'; }
+  var wd=fw?' data-which="farewell"':'';
+  if(st.state==="pending"){ h+='<div class="acts"><button class="btn bd" data-act="done"'+wd+' data-room="'+r.room+'">'+t("done")+'</button><button class="btn bx" data-act="dnd"'+wd+' data-room="'+r.room+'">'+t("dnd")+'</button></div>'; }
+  else { const tt=new Date(st.at), hh=String(tt.getHours()).padStart(2,"0")+":"+String(tt.getMinutes()).padStart(2,"0");
+    const lbl=st.state==="done"?t("done"):t("dnd")+(st.reason?" · "+esc(st.reason):"");
+    h+='<div class="track"><span class="st '+st.state+'">'+lbl+' · '+hh+' · '+esc(firstLast(st.byName||""))+'</span><button class="reopen" data-act="reopen"'+wd+' data-room="'+r.room+'">'+t("reopen")+'</button></div>'; }
   return h+'</div>';
 }
 function roomsView(sec){ const list=roomsInSection(sec); const tab=view.tab||"arr";
@@ -417,7 +440,8 @@ function roomsView(sec){ const list=roomsInSection(sec); const tab=view.tab||"ar
     '<button class="tab '+(tab==="inh"?"on":"")+'" data-tab="inh">'+t("inhouse")+'<span class="n">'+inh.length+'</span></button>'+
     (fw.length?'<button class="tab '+(tab==="fw"?"on":"")+'" data-tab="fw">'+t("farewellTab")+'<span class="n">'+fw.length+'</span></button>':"")+'</div>';
   const show = tab==="arr"?arr : tab==="inh"?inh : fw;
-  h+= show.length? '<div class="rooms">'+show.map(roomCard).join("")+'</div>' : '<div class="empty">'+t("noRooms")+'</div>';
+  const mode = tab==="fw"?"farewell":"normal";
+  h+= show.length? '<div class="rooms">'+show.map(function(r){return roomCard(r,mode);}).join("")+'</div>' : '<div class="empty">'+t("noRooms")+'</div>';
   return h;
 }
 function metric(l,v,warn){ return '<div class="metric'+(warn?" warn":"")+'"><div class="l">'+l+'</div><div class="v">'+v+'</div></div>'; }
@@ -425,7 +449,7 @@ function tool(go,ic,tt,s){ return '<button class="tool" data-go="'+go+'"><span c
 function dashView(){ const all=Object.values(S.rooms); const arr=all.filter(r=>r.type==="arrival");
   const pendingArr=arr.filter(r=>r.status.state==="pending"); const before15=pendingArr.filter(r=>r.arrivalTime && r.arrivalTime<CFG.cutoff);
   const dnd=all.filter(r=>r.status.state==="dnd"); const pending=all.filter(r=>r.status.state==="pending");
-  const fwPending=all.filter(r=>r.farewell && r.status.state==="pending"); const cov=coverage(all);
+  const fwPending=all.filter(r=>r.farewell && r.farewellStatus.state==="pending"); const cov=coverage(all);
   let h='<div class="eyebrow">'+CFG.date+' · '+t("live")+'</div><h2 class="sec">'+t("mgrDash")+'</h2><div class="metrics">'+
     metric(t("coverage"),cov+"%")+metric(t("before15"),before15.length,before15.length>0)+metric(t("pendingTotal"),pending.length)+metric("DnD",dnd.length)+metric(t("farewellPending"),fwPending.length)+'</div>';
   h+='<div class="panel"><h3>'+t("progressBy")+'<span class="faint" style="font-weight:400">'+t("effortUpd")+' '+nowHHMM()+'</span></h3>';
@@ -445,7 +469,7 @@ function dashView(){ const all=Object.values(S.rooms); const arr=all.filter(r=>r
       : '<div class="muted" style="font-size:13px">'+t("allArrDone")+'</div>';
   h+='</div>';
   h+='<h2 class="sec" style="margin-top:18px">'+t("tools")+'</h2><div class="toolgrid">'+
-    tool("emails","✉",t("tEmails"),t("tEmailsS"))+tool("sections","▦",t("tRooms"),t("tRoomsS"))+
+    tool("emails","✉",t("tEmails"),t("tEmailsS"))+tool("sections","▦",t("tRooms"),t("tRoomsS"))+tool("moves","⇄",t("roomChanges"),t("roomChangesS"))+
     tool("import","⤓",t("tImport"),t("tImportS"))+tool("users","◍",t("tUsers"),t("tUsersS"))+
     tool("audit","≡",t("tAudit"),t("tAuditS"))+tool("archive","⎘",t("tArchive"),t("tArchiveS"))+'</div>';
   return h;
@@ -454,7 +478,7 @@ const SIG="\nBest regards,\n[Sender name]\nRoom Service & Mini Bar\nIkos Aria\n\
 function dndText(){ const dnd=Object.values(S.rooms).filter(r=>r.status.state==="dnd").sort((a,b)=>a.room.localeCompare(b.room));
   let b="Dear all,\n\nKalispera,\n\nI would like to inform that the following rooms either did not require a refill or had a DnD sign displayed at the time of Mini Bar service:\n\n\n";
   b+= dnd.length? dnd.map(r=>r.room+" DND").join("\n") : t("none"); return {body:b+"\n"+SIG, n:dnd.length}; }
-function farewellText(){ const fw=Object.values(S.rooms).filter(r=>r.farewell && r.status.state==="dnd").sort((a,b)=>a.room.localeCompare(b.room));
+function farewellText(){ const fw=Object.values(S.rooms).filter(r=>r.farewell && r.farewellStatus.state==="dnd").sort((a,b)=>a.room.localeCompare(b.room));
   let b="Dear all,\n\nKalispera,\n\nPlease note that the following room(s) had a DnD sign displayed and did not receive a farewell gift:\n\n\n";
   b+= fw.length? fw.map(r=>r.room+" DND"+(r.name?" ("+String(r.name).split(",")[0]+")":"")).join("\n") : t("none"); return {body:b+"\n"+SIG, n:fw.length}; }
 function conciergeText(){ const dnd=Object.values(S.rooms).filter(r=>r.status.state==="dnd").sort((a,b)=>a.room.localeCompare(b.room));
@@ -475,13 +499,15 @@ function emailsView(){ const d=dndText(), f=farewellText(), c=conciergeText();
 function importView(){ let h='<button class="back" data-go="dash">‹ '+t("dashboard")+'</button><h2 class="sec">'+t("importTitle")+'</h2>';
   h+='<div class="panel"><h3>'+t("impStep1")+'</h3><input type="file" id="f_gib" accept=".txt,.csv" class="file-in"><div class="muted" style="font-size:13px">'+t("impStep1s")+'</div></div>';
   h+='<div class="panel"><h3>'+t("impStep2")+'</h3><input type="file" id="f_xls" accept=".xlsx" class="file-in"><div class="muted" style="font-size:13px">'+t("impStep2s")+'</div></div>';
+  h+='<div class="panel"><h3>'+t("impStep3")+'</h3><input type="file" id="f_doc" accept=".docx" class="file-in"><div class="muted" style="font-size:13px">'+t("impStep3s")+'</div></div>';
   h+='<button class="btn pri block" id="doImport">'+t("impLoad")+'</button><div class="note">'+t("impNote")+'</div><div id="impmsg" class="lt" style="margin-top:10px"></div>';
   return h;
 }
 const PREF={"7SUG":["Sugar-free","diet"],"7VEG":["Vegetarian","diet"],"7VGN":["Vegan","diet"],"7DRY":["Dairy-free","diet"],"7PES":["Pescatarian","diet"],"AGLU":["Gluten allergy","allergy"],"ANUT":["Nut allergy","allergy"],"ANUTSTRN":["Nut allergy","allergy"],"ANUTSTRO":["Nut allergy","allergy"],"AEGG":["Egg allergy","allergy"],"AFIS":["Fish allergy","allergy"],"AFISHTRN":["Fish allergy","allergy"],"AMSH":["Shellfish allergy","allergy"],"AKIW":["Kiwi allergy","allergy"],"ALAT":["Latex allergy","allergy"],"AALCOHOL":["No/low alcohol","pref"],"7ALC":["No/low alcohol","pref"],"ACEREALTRN":["Cereal","diet"],"AOTHFB":["F&B note","diet"]};
 function cleanRooms(s){ if(s==null)return[]; const out=[]; String(s).split("/").forEach(p=>{ if(p.indexOf("->")>=0)p=p.split("->").pop(); const m=p.match(/([1-8]\d{3})/); if(m)out.push(m[1]); }); return out; }
-function gibParse(text){ const lines=text.split(/\r?\n/).filter(x=>x.length); const head=lines[0].split("\t"); const idx={}; head.forEach((h,i)=>idx[h.trim()]=i);
-  const get=(c,col)=>{ const i=idx[col]; return i==null?"":(c[i]||"").trim(); }; const rooms={}; const today=CFG.date;
+function gibParse(text, today){ const lines=text.split(/\r?\n/).filter(x=>x.length); const head=lines[0].split("\t"); const idx={}; head.forEach((h,i)=>idx[h.trim()]=i);
+  if(idx["ROOM"]==null){ throw new Error(t("wrongReport")); }
+  const get=(c,col)=>{ const i=idx[col]; return i==null?"":(c[i]||"").trim(); }; const rooms={};
   for(let li=1; li<lines.length; li++){ const c=lines[li].split("\t"); const rm=get(c,"ROOM"); if(!/^[1-8]\d{3}$/.test(rm)||rooms[rm])continue;
     const b=rm[0], deluxe="678".includes(b); const chips=[],flags={};
     get(c,"PREFERENCES").split(",").forEach(code=>{ code=code.trim(); if(!code||["1","2","3"].includes(code))return; if(PREF[code]){chips.push({t:PREF[code][0],c:PREF[code][1]});flags[code]=true;} else if(code==="ATT"){flags.ATT=true;} else chips.push({t:code,c:"other"}); });
@@ -494,7 +520,7 @@ function gibParse(text){ const lines=text.split(/\r?\n/).filter(x=>x.length); co
 }
 function xlsRows(wb,name){ const ws=wb.Sheets[name]; if(!ws)return[]; return XLSX.utils.sheet_to_json(ws,{header:1,defval:""}); }
 function parseDate(s){ const m=String(s).match(/(\d{2})\/(\d{2})\/(\d{2})/); if(!m)return null; return new Date(2000+ +m[3], +m[2]-1, +m[1]); }
-function enrich(rooms,wb){ const ensure=rm=>{ if(!rooms[rm]){ const b=rm[0]; rooms[rm]={room:rm,section:sectionOf(rm),building:b,area:"",deluxeRoom:"678".includes(b),type:"inhouse",pax:{adults:0,children:0},arrival:CFG.date,departure:"",arrivalTime:null,category:"",vip:"",company:"",name:"",specialReq:"",resComment:"",chips:[],flags:{},minibarReq:"",roomServiceReq:"",amenity:"",allergyText:"",attentionNote:"",dlxBenefits:false,wheelchair:false,contagious:false,farewell:false,status:{state:"pending",by:null,byName:null,at:null,reason:null}}; } return rooms[rm]; };
+function enrich(rooms,wb,today){ const ensure=rm=>{ if(!rooms[rm]){ const b=rm[0]; rooms[rm]={room:rm,section:sectionOf(rm),building:b,area:"",deluxeRoom:"678".includes(b),type:"inhouse",pax:{adults:0,children:0},arrival:today,departure:"",arrivalTime:null,category:"",vip:"",company:"",name:"",specialReq:"",resComment:"",chips:[],flags:{},minibarReq:"",roomServiceReq:"",amenity:"",allergyText:"",attentionNote:"",dlxBenefits:false,wheelchair:false,contagious:false,farewell:false,status:{state:"pending",by:null,byName:null,at:null,reason:null}}; } return rooms[rm]; };
   xlsRows(wb,"Arrivals Master").slice(2).forEach(r=>{ if(!r[0]||r[0]==="Name")return; cleanRooms(r[1]).forEach(rm=>{const x=ensure(rm);x.type="arrival";if(!x.name)x.name=String(r[0]).trim();}); });
   const nt={}; xlsRows(wb,"Daily Overview").forEach(r=>{ if(typeof r[0]==="string"&&r[0].indexOf(",")>=0){ let tm=r[3]; let v=null; if(tm instanceof Date) v=String(tm.getHours()).padStart(2,"0")+":"+String(tm.getMinutes()).padStart(2,"0"); else if(typeof tm==="number"){const h=Math.floor(tm*24),m=Math.round((tm*24-h)*60);v=String(h).padStart(2,"0")+":"+String(m).padStart(2,"0");} if(v){const sur=r[0].split(/[,\s]+/)[0].toLowerCase();(nt[sur]=nt[sur]||[]).push(v);} } });
   Object.values(rooms).sort((a,b)=>a.room.localeCompare(b.room)).forEach(r=>{ if(r.type==="arrival"&&r.name){const sur=r.name.split(/[,\s]+/)[0].toLowerCase(); if(nt[sur]&&nt[sur].length)r.arrivalTime=nt[sur].shift();} });
@@ -504,7 +530,7 @@ function enrich(rooms,wb){ const ensure=rm=>{ if(!rooms[rm]){ const b=rm[0]; roo
   xlsRows(wb,"DLX Benefits").slice(2).forEach(r=>{ cleanRooms(r[1]).forEach(rm=>ensure(rm).dlxBenefits=true); });
   xlsRows(wb,"ATTENTION GUESTS").forEach(r=>{ if(!r||r.length<5)return; let com=null; for(let i=4;i<6;i++){if(typeof r[i]==="string"&&r[i].toUpperCase().indexOf("ATTENTION")>=0)com=r[i].trim();} cleanRooms(r[1]).forEach(rm=>{const x=ensure(rm);x.flags.ATT=true;if(com)x.attentionNote=com.slice(0,140);}); });
   xlsRows(wb," TOPSPENDERS-CONTAGIOUS-WHEELCH").forEach(r=>{ cleanRooms(r[1]).forEach(rm=>ensure(rm).wheelchair=true); cleanRooms(r[5]).forEach(rm=>ensure(rm).contagious=true); });
-  const today=parseDate(CFG.date);
+  const todayD=parseDate(today);
   const KW=[["sparkl","Sparkling","amenity"],["champagne","Champagne","amenity"],["cava","Cava","amenity"],["honeymoon","Honeymoon","amenity"],["anniversary","Anniversary","amenity"],["cot","Baby cot","baby"],["crib","Baby cot","baby"],["baby","Baby","baby"],["cake","Cake","amenity"],["soya","Soya milk","diet"],["flower","Flowers","amenity"],["wedding","Wedding","amenity"]];
   Object.values(rooms).forEach(r=>{ const blob=[r.minibarReq,r.roomServiceReq,r.amenity,r.specialReq,r.resComment,r.allergyText].join(" ").toLowerCase(); const seen=new Set(r.chips.map(c=>c.t));
     KW.forEach(a=>{ if(blob.indexOf(a[0])>=0&&!seen.has(a[1])){r.chips.push({t:a[1],c:a[2]});seen.add(a[1]);} });
@@ -512,20 +538,41 @@ function enrich(rooms,wb){ const ensure=rm=>{ if(!rooms[rm]){ const b=rm[0]; roo
     if(r.deluxeRoom&&!seen.has("Deluxe")){r.chips.push({t:"Deluxe",c:"dlx"});seen.add("Deluxe");}
     if(r.wheelchair&&!seen.has("Wheelchair"))r.chips.push({t:"Wheelchair",c:"care"});
     if(r.contagious&&!seen.has("Contagious"))r.chips.push({t:"Contagious",c:"danger"});
-    const d=parseDate(r.departure); if(r.deluxeRoom&&d&&today){const diff=Math.round((d-today)/864e5);if(diff>=0&&diff<=2){r.farewell=true;if(!seen.has("Farewell gift"))r.chips.unshift({t:"Farewell gift",c:"farewell"});}} });
+    const d=parseDate(r.departure); if(r.deluxeRoom&&d&&todayD){const diff=Math.round((d-todayD)/864e5);if(diff>=0&&diff<=2){r.farewell=true;if(!seen.has("Farewell gift"))r.chips.unshift({t:"Farewell gift",c:"farewell"});}} });
   return rooms;
 }
 function readFile(input,bin){ return new Promise((res,rej)=>{ const f=input.files[0]; if(!f){res(null);return;} const r=new FileReader(); r.onload=()=>res(r.result); r.onerror=rej; bin?r.readAsArrayBuffer(f):r.readAsText(f); }); }
+function detectDateXlsx(wb){ try{ const ws=wb.Sheets["Daily Overview"]; if(!ws)return null; const rows=XLSX.utils.sheet_to_json(ws,{header:1,defval:""}); for(let i=0;i<Math.min(6,rows.length);i++){ const line=(rows[i]||[]).join(" "); const m=line.match(/\/(\d{1,2})\.(\d{1,2})\/?/); if(m){ return ("0"+m[1]).slice(-2)+"/"+("0"+m[2]).slice(-2)+"/"+String(new Date().getFullYear()).slice(2); } } }catch(e){} return null; }
+function detectDateGib(text){ const lines=text.split(/\r?\n/).filter(x=>x.length); if(lines.length<2)return null; const ai=lines[0].split("\t").indexOf("ARRIVAL"); if(ai<0)return null; const cnt={}; for(let i=1;i<lines.length;i++){ const v=(lines[i].split("\t")[ai]||"").trim(); if(parseDate(v)) cnt[v]=(cnt[v]||0)+1; } let best=null,bn=0; for(const k in cnt){ if(cnt[k]>bn){bn=cnt[k];best=k;} } return best; }
+function dateFromName(nm){ if(!nm)return null; const m=String(nm).match(/(\d{2})[._-](\d{2})(?:[._-](\d{2,4}))?/); if(!m)return null; const yy=m[3]?String(m[3]).slice(-2):String(new Date().getFullYear()).slice(2); return m[1]+"/"+m[2]+"/"+yy; }
+async function parseMoves(buf){ if(typeof mammoth==="undefined")return []; const res=await mammoth.convertToHtml({arrayBuffer:buf}); const doc=new DOMParser().parseFromString(res.value,"text/html"); const moves=[]; Array.prototype.forEach.call(doc.querySelectorAll("table"),function(tb){ const rows=Array.prototype.slice.call(tb.querySelectorAll("tr")); if(!rows.length)return; const head=(rows[0].innerText||"").toUpperCase(); if(head.indexOf("OLD ROOM")>=0 && head.indexOf("NEW ROOM")>=0){ rows.slice(1).forEach(function(tr){ const c=Array.prototype.slice.call(tr.querySelectorAll("td,th")).map(function(x){return (x.innerText||"").trim();}); const o=(c[0]||"").match(/[1-8]\d{3}/), n=(c[3]||"").match(/[1-8]\d{3}/); if(o&&n) moves.push({from:o[0],to:n[0],name:c[1]||"",dates:c[2]||"",pax:c[4]||"",comment:c[7]||""}); }); } }); return moves; }
+function applyMoves(rooms, moves){ moves.forEach(function(m){ const r=rooms[m.to]; if(r){ r.type="inhouse"; r.moved={from:m.from,name:m.name,comment:m.comment,dates:m.dates}; } }); }
 async function doImport(){ const msg=$("#impmsg");
   try{ const gtext=await readFile($("#f_gib"),false); if(!gtext){ msg.textContent=t("impNeed"); return; }
-    let rooms=gibParse(gtext); const xbuf=await readFile($("#f_xls"),true);
-    if(xbuf){ if(typeof XLSX==="undefined"){ msg.textContent=t("impXlsxFail"); } else { const wb=XLSX.read(new Uint8Array(xbuf),{type:"array",cellDates:true}); rooms=enrich(rooms,wb); } }
-    Object.values(rooms).forEach(r=>{ const old=S.rooms[r.room]; if(old&&old.status&&old.status.state!=="pending") r.status=old.status; });
+    const xbuf=await readFile($("#f_xls"),true); let wb=null;
+    if(xbuf){ if(typeof XLSX==="undefined"){ msg.textContent=t("impXlsxFail"); return; } wb=XLSX.read(new Uint8Array(xbuf),{type:"array",cellDates:true}); }
+    const xn=($("#f_xls").files[0]||{}).name, dn=($("#f_doc").files[0]||{}).name;
+    const today=(wb&&detectDateXlsx(wb))||dateFromName(xn)||dateFromName(dn)||detectDateGib(gtext)||CFG.date; CFG.date=today;
+    let rooms=gibParse(gtext, today);
+    if(wb) rooms=enrich(rooms,wb,today);
+    const dbuf=await readFile($("#f_doc"),true); let moves=[];
+    if(dbuf){ moves=await parseMoves(dbuf); applyMoves(rooms,moves); }
+    Object.values(rooms).forEach(r=>{ const old=S.rooms[r.room]; if(old){ if(old.status&&old.status.state!=="pending") r.status=old.status; if(old.farewellStatus&&old.farewellStatus.state!=="pending") r.farewellStatus=old.farewellStatus; } });
     const keepNotes={}; Object.keys(S.notes||{}).forEach(rm=>{ const n=S.notes[rm], nr=rooms[rm]; if(nr && nr.arrival===n.arr) keepNotes[rm]=n; }); S.notes=keepNotes;
-    S.rooms=rooms; S.date=CFG.date; audit("Import", Object.keys(rooms).length+" rooms"); persist();
+    S.rooms=rooms; S.date=today; S.moves=moves; S.moveDate=today; S=normalizeState(S); audit("Import", Object.keys(rooms).length+" rooms"+(moves.length?(" · "+moves.length+" moves"):"")); persist();
     const arr=Object.values(rooms).filter(r=>r.type==="arrival").length;
-    msg.innerHTML='<span style="color:var(--green-d)">✓ '+t("impOk1")+' '+Object.keys(rooms).length+' '+t("impOk2")+' ('+arr+' '+t("impOkArr")+').</span>'; toast("Import OK");
+    msg.innerHTML='<span style="color:var(--green-d)">✓ '+today+' — '+t("impOk1")+' '+Object.keys(rooms).length+' '+t("impOk2")+' ('+arr+' '+t("impOkArr")+(moves.length?(", "+moves.length+" "+t("movesLoaded")):"")+').</span>'; toast("Import OK"); render();
   }catch(e){ msg.textContent=t("impErr")+e.message; }
+}
+function movesView(){ let h='<button class="back" data-go="'+(me.role==="manager"?"dash":"sections")+'">‹ '+(me.role==="manager"?t("dashboard"):t("sections"))+'</button><h2 class="sec">'+t("roomChanges")+'</h2>';
+  const mv=S.moves||[]; if(!mv.length) return h+'<div class="empty">'+t("noMoves")+'</div>';
+  h+='<div class="panel">'; mv.forEach(function(m){ h+='<div class="urow"><span class="mono" style="min-width:120px">'+esc(m.from)+' → '+esc(m.to)+'</span><span class="nm">'+esc(firstLast(m.name))+(m.comment?' · '+esc(m.comment):"")+'</span><span class="rl">'+esc(m.dates||"")+'</span></div>'; });
+  return h+'</div>';
+}
+function histDayView(idx){ const x=(S.history||[])[idx]; let h='<button class="back" data-go="archive">‹ '+t("history")+'</button><h2 class="sec">'+t("dayLog")+' — '+(x?esc(x.date):"")+'</h2><div class="panel">';
+  const a=(x&&x.audit)||[]; if(!a.length) h+='<div class="muted" style="font-size:13px">'+t("empty")+'</div>';
+  a.forEach(function(e){ const tt=new Date(e.at); const ts=String(tt.getHours()).padStart(2,"0")+":"+String(tt.getMinutes()).padStart(2,"0"); h+='<div class="auditrow"><span class="ti">'+ts+'</span><span class="ac">'+esc(e.action)+'</span><span class="muted">'+esc(e.detail)+'</span><span style="flex:1"></span><span class="faint">'+esc(firstLast(e.user))+'</span></div>'; });
+  return h+'</div>';
 }
 function usersView(){ let h='<button class="back" data-go="dash">‹ '+t("dashboard")+'</button><h2 class="sec">'+t("usersTitle")+'</h2><div class="panel" id="ulist">';
   S.users.forEach((u,i)=>{ h+='<div class="urow" data-i="'+i+'">'+
@@ -548,7 +595,7 @@ function archiveView(){ const all=Object.values(S.rooms), c=counts(all);
   let h='<button class="back" data-go="dash">‹ '+t("dashboard")+'</button><h2 class="sec">'+t("closeDay")+'</h2>'+
     '<div class="panel"><h3>'+CFG.date+'</h3><div class="muted" style="font-size:13px">'+t("closed")+' '+(c.done+c.dnd)+'/'+c.total+' · '+t("doneN")+' '+c.done+' · DnD '+c.dnd+' · '+t("pendingN")+' '+c.pending+'</div>'+
     '<div class="acts" style="margin-top:12px"><button class="btn pri sm" id="archDl">'+t("dlJson")+'</button><button class="btn sm" id="archStore">'+t("archiveReset")+'</button></div></div>';
-  if(S.history&&S.history.length){ h+='<div class="panel"><h3>'+t("history")+'</h3>'; S.history.slice(0,20).forEach(x=>{ h+='<div class="urow"><span class="mono">'+esc(x.date)+'</span><span class="nm muted">'+x.done+' done · '+x.dnd+' DnD</span></div>'; }); h+='</div>'; }
+  if(S.history&&S.history.length){ h+='<div class="panel"><h3>'+t("history")+'</h3>'; S.history.slice(0,40).forEach((x,i)=>{ h+='<button class="urow" data-hist="'+i+'" style="width:100%;text-align:left;background:none;border:none;border-bottom:1px solid var(--line);cursor:pointer"><span class="mono">'+esc(x.date)+'</span><span class="nm muted">'+x.done+' done · '+x.dnd+' DnD'+((x.audit&&x.audit.length)?' · '+x.audit.length+' '+t("dayLog").toLowerCase():"")+'</span><span class="rl">›</span></button>'; }); h+='</div>'; }
   return h;
 }
 
@@ -557,10 +604,10 @@ function bindMain(){
   document.querySelectorAll("[data-go]").forEach(b=>b.onclick=()=>{ view={name:b.dataset.go}; render(); });
   document.querySelectorAll("[data-sec]").forEach(b=>b.onclick=()=>{ view={name:"rooms",sec:b.dataset.sec,tab:"arr"}; render(); });
   document.querySelectorAll("[data-tab]").forEach(b=>b.onclick=()=>{ view.tab=b.dataset.tab; render(); });
-  document.querySelectorAll("[data-act]").forEach(b=>b.onclick=()=>{ const rm=b.dataset.room, act=b.dataset.act;
-    if(act==="done") setStatus(rm,"done");
-    else if(act==="dnd"){ const why=prompt(t("dndPrompt"),""); setStatus(rm,"dnd",why?why.trim():null); }
-    else if(act==="reopen") setStatus(rm,"pending");
+  document.querySelectorAll("[data-act]").forEach(b=>b.onclick=()=>{ const rm=b.dataset.room, act=b.dataset.act, which=b.dataset.which||"status";
+    if(act==="done") setStatus(rm,"done",null,which);
+    else if(act==="dnd"){ const why=prompt(t("dndPrompt"),""); setStatus(rm,"dnd",why?why.trim():null,which); }
+    else if(act==="reopen") setStatus(rm,"pending",null,which);
     else if(act==="note") setNote(rm); });
   document.querySelectorAll("[data-copy]").forEach(b=>b.onclick=()=>{ const el=document.getElementById(b.dataset.copy);
     try{ navigator.clipboard.writeText(el.innerText).then(()=>toast(t("copied")),()=>toast(t("copyManual"))); }catch(e){ toast(t("copyManual")); } });
@@ -568,18 +615,20 @@ function bindMain(){
   const su=$("#saveUsers"); if(su) su.onclick=()=>{ document.querySelectorAll("#ulist .urow").forEach(row=>{ const i=+row.dataset.i; const u=S.users[i]; if(!u)return;
       u.name=row.querySelector('[data-f="name"]').value.trim()||u.name; u.title=row.querySelector('[data-f="title"]').value.trim();
       u.role=row.querySelector('[data-f="role"]').value; u.pin=row.querySelector('[data-f="pin"]').value.trim()||u.pin; u.active=row.querySelector('[data-f="active"]').checked; });
-    audit("Users updated",""); persist(); toast(t("saved")); render(); };
+    audit("Users updated",""); fbUpdate({users:S.users,audit:S.audit}); toast(t("saved")); render(); };
   const au=$("#addUser"); if(au) au.onclick=()=>{ S.users.push({id:"u_"+Date.now(),name:"",title:"Barista",role:"barista",pin:"",active:true}); render(); };
-  document.querySelectorAll("[data-rm]").forEach(b=>b.onclick=()=>{ if(!confirm(t("removeUser")))return; S.users.splice(+b.dataset.rm,1); audit("User removed",""); persist(); render(); });
+  document.querySelectorAll("[data-rm]").forEach(b=>b.onclick=()=>{ if(!confirm(t("removeUser")))return; S.users.splice(+b.dataset.rm,1); audit("User removed",""); fbUpdate({users:S.users,audit:S.audit}); render(); });
+  document.querySelectorAll("[data-hist]").forEach(b=>b.onclick=()=>{ view={name:"histday",idx:+b.dataset.hist}; render(); });
   const ad=$("#archDl"); if(ad) ad.onclick=()=>{ const blob=new Blob([JSON.stringify(S,null,2)],{type:"application/json"}); const a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download="ikos_minibar_"+CFG.date.replace(/\//g,"-")+".json"; a.click(); };
-  const as=$("#archStore"); if(as) as.onclick=()=>{ if(!confirm(t("confirmArchive")))return; const c=counts(Object.values(S.rooms)); S.history=S.history||[]; S.history.unshift({date:CFG.date,done:c.done,dnd:c.dnd,total:c.total,at:Date.now()});
-    Object.values(S.rooms).forEach(r=>r.status={state:"pending",by:null,byName:null,at:null,reason:null}); audit("Day closed",CFG.date); persist(); toast(t("saved")); view={name:"dash"}; render(); };
+  const as=$("#archStore"); if(as) as.onclick=()=>{ if(!confirm(t("confirmArchive")))return; const c=counts(Object.values(S.rooms)); S.history=S.history||[]; audit("Day closed",CFG.date); S.history.unshift({date:CFG.date,done:c.done,dnd:c.dnd,total:c.total,at:Date.now(),audit:(S.audit||[]).slice(0,1000)});
+    Object.values(S.rooms).forEach(r=>{ r.status={state:"pending",by:null,byName:null,at:null,reason:null}; r.farewellStatus={state:"pending"}; }); S.audit=[]; persist(); toast(t("saved")); view={name:"dash"}; render(); };
 }
 $("#logout").onclick=()=>{ me=null; view={name:"login"}; pinBuf=""; render(); };
 $("#lang").onclick=()=>{ setLang(lang==="en"?"el":"en"); };
 
 /* ---------- boot ---------- */
-function loadXLSX(){ const s=document.createElement("script"); s.src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"; document.head.appendChild(s); }
+function loadLib(src){ const s=document.createElement("script"); s.src=src; document.head.appendChild(s); }
+function loadXLSX(){ loadLib("https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"); loadLib("https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"); }
 loadLocal(); render(); loadXLSX(); connectFirebase();
 setInterval(()=>{ $("#clock").textContent=nowHHMM(); }, 30000);
 </script>
