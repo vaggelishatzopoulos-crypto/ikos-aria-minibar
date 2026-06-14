@@ -298,8 +298,11 @@ function normalizeState(s){
   });
   return s;
 }
-function persist(){ if(FB){ FB.ref("state").set(S).catch(e=>setFb("error","write: "+((e&&e.code)||(e&&e.message)||e))); } else { ls(false, JSON.stringify(S)); } }
-function fbUpdate(obj){ if(FB){ FB.ref("state").update(obj).catch(e=>setFb("error","write: "+((e&&e.code)||(e&&e.message)||e))); } else { ls(false, JSON.stringify(S)); } }
+function cacheLocal(){ try{ localStorage.setItem("iar_mb", JSON.stringify(S)); }catch(e){} }
+function persist(){ cacheLocal(); if(FB){ FB.ref("state").set(S).catch(e=>setFb("error","write: "+((e&&e.code)||(e&&e.message)||e))); } }
+function fbUpdate(obj){ cacheLocal(); if(FB){ FB.ref("state").update(obj).catch(e=>setFb("error","write: "+((e&&e.code)||(e&&e.message)||e))); } }
+function normRoom(r){ if(!r)return r; if(!r.status||typeof r.status!=="object")r.status={state:"pending"}; if(!r.status.state)r.status.state="pending"; if(!Array.isArray(r.chips))r.chips=[]; if(!r.pax||typeof r.pax!=="object")r.pax={adults:0,children:0}; if(!r.flags||typeof r.flags!=="object")r.flags={}; if(!r.farewellStatus||typeof r.farewellStatus!=="object")r.farewellStatus={state:"pending"}; if(!r.farewellStatus.state)r.farewellStatus.state="pending"; return r; }
+var _rt=null; function scheduleRender(){ if(_rt)return; _rt=setTimeout(function(){ _rt=null; render(); }, 120); }
 function loadLocal(){ const raw=ls(true); if(raw){ try{ S=JSON.parse(raw); }catch(e){ S=freshState(); } } else S=freshState(); S=normalizeState(S); }
 
 /* ---------- firebase ---------- */
@@ -308,21 +311,29 @@ function setFb(state,msg){ FB_ERR=msg||""; const el=document.getElementById("fbs
   el.textContent = state==="live"?"● Live": state==="connecting"?("● "+t("conn")): state==="error"?"● Error": ("● "+t("localTag"));
   el.onclick=()=>{ toast(state==="live"?t("connSync"):(FB_ERR||t("localOnly"))); };
 }
-function loadScript(src){ return new Promise((res,rej)=>{ const s=document.createElement("script"); s.src=src; s.onload=res; s.onerror=()=>rej(new Error("load "+src)); document.head.appendChild(s); }); }
+function loadScript(srcs){ if(typeof srcs==="string")srcs=[srcs]; return new Promise(function(res,rej){ var i=0; (function nx(){ if(i>=srcs.length){ rej(new Error("load "+srcs[0])); return; } var s=document.createElement("script"); s.src=srcs[i++]; s.onload=function(){res();}; s.onerror=function(){ nx(); }; document.head.appendChild(s); })(); }); }
 function connectFirebase(){
   if(!CFG.firebase || !CFG.firebase.apiKey){ setFb("local",t("noConfig")); return; }
   setFb("connecting"); var done=false;
   setTimeout(function(){ if(!done && !FB) setFb("local",t("timeout")); }, 8000);
-  Promise.all([
-    loadScript("https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"),
-    loadScript("https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"),
-    loadScript("https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js")
-  ]).then(function(){ firebase.initializeApp(CFG.firebase); return firebase.auth().signInAnonymously(); })
+  var FBV="10.12.2";
+  var U=function(f){ return ["https://cdnjs.cloudflare.com/ajax/libs/firebase/"+FBV+"/"+f,"https://cdn.jsdelivr.net/npm/firebase@"+FBV+"/"+f,"https://www.gstatic.com/firebasejs/"+FBV+"/"+f]; };
+  loadScript(U("firebase-app-compat.js"))
+    .then(function(){ return Promise.all([loadScript(U("firebase-database-compat.js")), loadScript(U("firebase-auth-compat.js"))]); })
+    .then(function(){ firebase.initializeApp(CFG.firebase); return firebase.auth().signInAnonymously(); })
   .then(function(){ FB=firebase.database(); return FB.ref("state").once("value"); })
   .then(function(snap){ done=true; var v=snap.val();
     if(v && v.rooms && Object.keys(v.rooms).length){ S=normalizeState(v); } else { FB.ref("state").set(S); }
-    FB.ref("state").on("value", function(s){ var nv=s.val(); if(nv && nv.rooms && Object.keys(nv.rooms).length){ S=normalizeState(nv); render(); } });
-    render(); setFb("live");
+    cacheLocal(); render(); setFb("live");
+    /* Granular sync: download ONLY the room that changed, not the whole state. */
+    var R=FB.ref("state/rooms");
+    R.on("child_changed", function(s){ S.rooms[s.key]=normRoom(s.val()); cacheLocal(); scheduleRender(); });
+    R.on("child_removed", function(s){ delete S.rooms[s.key]; cacheLocal(); scheduleRender(); });
+    var inited=false; setTimeout(function(){ inited=true; }, 2500);
+    R.on("child_added", function(s){ if(!inited)return; if(!S.rooms[s.key]){ S.rooms[s.key]=normRoom(s.val()); cacheLocal(); scheduleRender(); } });
+    FB.ref("state/notes").on("value", function(s){ S.notes=s.val()||{}; cacheLocal(); scheduleRender(); });
+    FB.ref("state/users").on("value", function(s){ var u=s.val(); if(u){ S.users=Array.isArray(u)?u:Object.keys(u).map(function(k){return u[k];}); } cacheLocal(); });
+    FB.ref("state/date").on("value", function(s){ if(s.val()){ S.date=s.val(); CFG.date=s.val(); } });
   }).catch(function(e){ done=true; FB=null; var code=(e&&e.code)?e.code:((e&&e.message)?e.message:String(e)); setFb("error",code); console.warn("Firebase off:",e); });
 }
 
