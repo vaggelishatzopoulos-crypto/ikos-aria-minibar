@@ -288,6 +288,9 @@ function normalizeState(s){
   CFG.date=s.date;
   s.users.forEach(u=>{ if(u.active===undefined)u.active=true; });
   Object.keys(s.rooms).forEach(k=>{ const r=s.rooms[k];
+    if(!r||typeof r!=="object"){ delete s.rooms[k]; return; }
+    if(!r.room) r.room=k;
+    if(!CFG.sections[r.section]) r.section=sectionOf(String(r.room||k));
     if(!r.status||typeof r.status!=="object") r.status={state:"pending"};
     if(!r.status.state) r.status.state="pending";
     if(!Array.isArray(r.chips)) r.chips=[];
@@ -301,7 +304,7 @@ function normalizeState(s){
 function cacheLocal(){ try{ localStorage.setItem("iar_mb", JSON.stringify(S)); }catch(e){} }
 function persist(){ cacheLocal(); if(FB){ FB.ref("state").set(S).catch(e=>setFb("error","write: "+((e&&e.code)||(e&&e.message)||e))); } }
 function fbUpdate(obj){ cacheLocal(); if(FB){ FB.ref("state").update(obj).catch(e=>setFb("error","write: "+((e&&e.code)||(e&&e.message)||e))); } }
-function normRoom(r){ if(!r)return r; if(!r.status||typeof r.status!=="object")r.status={state:"pending"}; if(!r.status.state)r.status.state="pending"; if(!Array.isArray(r.chips))r.chips=[]; if(!r.pax||typeof r.pax!=="object")r.pax={adults:0,children:0}; if(!r.flags||typeof r.flags!=="object")r.flags={}; if(!r.farewellStatus||typeof r.farewellStatus!=="object")r.farewellStatus={state:"pending"}; if(!r.farewellStatus.state)r.farewellStatus.state="pending"; return r; }
+function normRoom(r){ if(!r||typeof r!=="object")return null; if(!CFG.sections[r.section])r.section=sectionOf(String(r.room||"1000")); if(!r.status||typeof r.status!=="object")r.status={state:"pending"}; if(!r.status.state)r.status.state="pending"; if(!Array.isArray(r.chips))r.chips=[]; if(!r.pax||typeof r.pax!=="object")r.pax={adults:0,children:0}; if(!r.flags||typeof r.flags!=="object")r.flags={}; if(!r.farewellStatus||typeof r.farewellStatus!=="object")r.farewellStatus={state:"pending"}; if(!r.farewellStatus.state)r.farewellStatus.state="pending"; return r; }
 var _rt=null; function scheduleRender(){ if(_rt)return; _rt=setTimeout(function(){ _rt=null; render(); }, 120); }
 function loadLocal(){ const raw=ls(true); if(raw){ try{ S=JSON.parse(raw); }catch(e){ S=freshState(); } } else S=freshState(); S=normalizeState(S); }
 
@@ -327,10 +330,10 @@ function connectFirebase(){
     cacheLocal(); render(); setFb("live");
     /* Granular sync: download ONLY the room that changed, not the whole state. */
     var R=FB.ref("state/rooms");
-    R.on("child_changed", function(s){ S.rooms[s.key]=normRoom(s.val()); cacheLocal(); scheduleRender(); });
+    R.on("child_changed", function(s){ var r=normRoom(s.val()); if(r){ r.room=r.room||s.key; S.rooms[s.key]=r; cacheLocal(); scheduleRender(); } });
     R.on("child_removed", function(s){ delete S.rooms[s.key]; cacheLocal(); scheduleRender(); });
     var inited=false; setTimeout(function(){ inited=true; }, 2500);
-    R.on("child_added", function(s){ if(!inited)return; if(!S.rooms[s.key]){ S.rooms[s.key]=normRoom(s.val()); cacheLocal(); scheduleRender(); } });
+    R.on("child_added", function(s){ if(!inited)return; if(!S.rooms[s.key]){ var r=normRoom(s.val()); if(r){ r.room=r.room||s.key; S.rooms[s.key]=r; cacheLocal(); scheduleRender(); } } });
     FB.ref("state/notes").on("value", function(s){ S.notes=s.val()||{}; cacheLocal(); scheduleRender(); });
     FB.ref("state/users").on("value", function(s){ var u=s.val(); if(u){ S.users=Array.isArray(u)?u:Object.keys(u).map(function(k){return u[k];}); } cacheLocal(); });
     FB.ref("state/date").on("value", function(s){ if(s.val()){ S.date=s.val(); CFG.date=s.val(); } });
@@ -370,6 +373,7 @@ function render(){
   const root=$("#root");
   if(!me){ root.innerHTML=loginView(); bindLogin(); return; }
   let h="";
+  try{
   if(view.name==="rooms") h=roomsView(view.sec);
   else if(view.name==="dash") h=dashView();
   else if(view.name==="emails") h=emailsView();
@@ -381,7 +385,8 @@ function render(){
   else if(view.name==="histday") h=histDayView(view.idx);
   else if(view.name==="sections") h=sectionsView();
   else h=(me.role==="manager")?dashView():sectionsView();
-  root.innerHTML='<main><div class="wrap">'+h+'</div></main>'; bindMain();
+  }catch(err){ console.error("view error:",err); h='<div class="panel"><h3>'+t("dashboard")+'</h3><div class="muted" style="font-size:13px">'+esc(String(err&&err.message||err))+'</div><button class="btn pri" data-go="dash" style="margin-top:10px">'+t("dashboard")+'</button></div>'; }
+  root.innerHTML='<main><div class="wrap">'+h+'</div></main>'; try{ bindMain(); }catch(e){ console.error(e); }
 }
 function loginView(){
   return '<div class="login"><div class="lcard">'+
@@ -395,7 +400,7 @@ function loginView(){
 function bindLogin(){ const draw=()=>{ $("#pinrow").textContent="•".repeat(pinBuf.length); };
   document.querySelectorAll(".pad button").forEach(b=>b.onclick=()=>{ const k=b.dataset.k;
     if(k==="clr") pinBuf="";
-    else if(k==="ok"){ const u=activeUsers().find(x=>x.pin===pinBuf);
+    else if(k==="ok"){ const eq=function(x){return String(x.pin).trim()===String(pinBuf).trim();}; const u=activeUsers().find(eq)||DEFAULT_USERS.filter(x=>x.active!==false).find(eq);
       if(u){ me=u; pinBuf=""; view={name:u.role==="manager"?"dash":"sections"}; render(); }
       else { $("#lerr").textContent=t("wrongPin"); pinBuf=""; draw(); } }
     else if(pinBuf.length<6){ pinBuf+=k; } if(k!=="ok") draw(); });
